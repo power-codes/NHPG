@@ -1,7 +1,8 @@
-#!/bin/bash
+
+
 set -euo pipefail
 
-[[ $EUID -eq 0 ]] || { echo "این اسکریپت باید با روت اجرا بشه (sudo)."; exit 1; }
+[[ $EUID -eq 0 ]] || { echo "This script must be run as root (sudo)."; exit 1; }
 
 CFG=/opt/hiddify-manager/haproxy/haproxy.cfg
 CONF=/opt/hiddify-manager/haproxy/pasarguard_watchdog.conf
@@ -11,7 +12,7 @@ PATH_UNIT=/etc/systemd/system/pasarguard-watchdog.path
 LOG=/var/log/pasarguard_watchdog.log
 
 # ---------------------------------------------------------------------------
-#
+# Cleanup old separate units
 # ---------------------------------------------------------------------------
 cleanup_old_units() {
   for u in sni-reapply cdn-path-reapply; do
@@ -25,7 +26,7 @@ cleanup_old_units() {
 }
 
 # ---------------------------------------------------------------------------
-# ذخیره‌ی تنظیمات
+# Save Configuration
 # ---------------------------------------------------------------------------
 save_conf() {
   {
@@ -36,15 +37,12 @@ save_conf() {
       echo "  \"$s\""
     done
     echo ")"
-    echo "WS_PORT=$WS_PORT"
-    echo "WS_BACKEND=$WS_BACKEND"
-    echo "WS_PATH=\"$WS_PATH\""
   } > "$CONF"
-  echo "[+] تنظیمات ذخیره شد: $CONF"
+  echo "[+] Configuration saved: $CONF"
 }
 
 # ---------------------------------------------------------------------------
-# ساخت worker
+# Write Worker Script (The Watchdog logic)
 # ---------------------------------------------------------------------------
 write_worker() {
 cat > "$WORKER" <<'EOF'
@@ -55,14 +53,13 @@ CONF=/opt/hiddify-manager/haproxy/pasarguard_watchdog.conf
 CFG=/opt/hiddify-manager/haproxy/haproxy.cfg
 LOG=/var/log/pasarguard_watchdog.log
 ANCHOR_REALITY="tcp-request content accept if { req.ssl_hello_type 1 }"
-ANCHOR_WS="default_backend to_httpmode"
 
 # shellcheck source=/dev/null
 source "$CONF"
 
 CHANGED=0
 
-# ---- Reality: هر SNI که تو use_backend نبود اضافه می‌شه ----
+# ---- Reality: Add any SNI that is missing from the config ----
 for SNI in "${REALITY_SNIS[@]}"; do
   grep -qF "use_backend ${REALITY_BACKEND} if { req.ssl_sni -i ${SNI} }" "$CFG" || {
     sed -i "/${ANCHOR_REALITY//\//\\/}/a\\    use_backend ${REALITY_BACKEND} if { req.ssl_sni -i ${SNI} }" "$CFG"
@@ -70,47 +67,34 @@ for SNI in "${REALITY_SNIS[@]}"; do
   }
 done
 
-# ---- بلاک backend ریالیتی: دقیقاً یک بار ----
+# ---- Reality backend block: Ensure it exists exactly once ----
 grep -q "^backend ${REALITY_BACKEND}\$" "$CFG" || {
   printf '\nbackend %s\n    mode tcp\n    server pg_reality 127.0.0.1:%s send-proxy-v2\n' \
     "$REALITY_BACKEND" "$REALITY_PORT" >> "$CFG"
   CHANGED=1
 }
 
-# ---- CDN / WS path ----
-grep -qF "use_backend ${WS_BACKEND} if { path_beg ${WS_PATH} }" "$CFG" || {
-  sed -i "/${ANCHOR_WS}/i\\    use_backend ${WS_BACKEND} if { path_beg ${WS_PATH} }" "$CFG"
-  CHANGED=1
-}
-
-# ---- بلاک backend ws: دقیقاً یک بار ----
-grep -q "^backend ${WS_BACKEND}\$" "$CFG" || {
-  printf '\nbackend %s\n    mode http\n    server pg_ws 127.0.0.1:%s send-proxy-v2\n' \
-    "$WS_BACKEND" "$WS_PORT" >> "$CFG"
-  CHANGED=1
-}
-
 if [[ $CHANGED -eq 1 ]]; then
   if haproxy -c -f "$CFG"; then
     systemctl reload hiddify-haproxy
-    echo "$(date '+%F %T') OK - reapplied + reloaded" >> "$LOG"
+    echo "$(date '+%F %T') OK - Reality SNIs reapplied + HAProxy reloaded" >> "$LOG"
   else
-    echo "$(date '+%F %T') CONFIG CHECK FAILED - reload skipped" >> "$LOG"
+    echo "$(date '+%F %T') CONFIG CHECK FAILED - HAProxy reload skipped" >> "$LOG"
   fi
 else
-  echo "$(date '+%F %T') no change needed" >> "$LOG"
+  echo "$(date '+%F %T') No changes needed" >> "$LOG"
 fi
 EOF
 chmod +x "$WORKER"
 }
 
 # ---------------------------------------------------------------------------
-# ساخت واحدهای systemd
+# Write Systemd Units
 # ---------------------------------------------------------------------------
 write_systemd_units() {
 cat > "$SERVICE" <<EOF
 [Unit]
-Description=Reapply Pasarguard reality+ws backends into haproxy.cfg
+Description=Reapply Pasarguard Reality backends into haproxy.cfg
 
 [Service]
 Type=oneshot
@@ -119,7 +103,7 @@ EOF
 
 cat > "$PATH_UNIT" <<EOF
 [Unit]
-Description=Watch haproxy.cfg and instantly reapply pasarguard backends
+Description=Watch haproxy.cfg and instantly reapply Reality SNIs
 
 [Path]
 PathModified=$CFG
@@ -131,27 +115,22 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# گزینه 1: نصب کامل
+# Option 1: Full Installation
 # ---------------------------------------------------------------------------
 do_install() {
-  echo "--- تنظیمات Reality ---"
-  read -rp "پورت ریالیتی (مثلا 20001): " REALITY_PORT
+  echo "--- Reality Configuration ---"
+  read -rp "Enter Reality Port (e.g., 20001): " REALITY_PORT
 
   REALITY_SNIS=()
-  read -rp "SNI اول: " sni1
+  read -rp "Enter first SNI: " sni1
   REALITY_SNIS+=("$sni1")
   while true; do
-    read -rp "SNI بعدی رو وارد کن (برای رد شدن 0 بزن): " sni_next
+    read -rp "Enter next SNI (Enter 0 or leave blank to finish): " sni_next
     [[ "$sni_next" == "0" || -z "$sni_next" ]] && break
     REALITY_SNIS+=("$sni_next")
   done
 
-  echo "--- تنظیمات CDN / WebSocket ---"
-  read -rp "Path مربوط به CDN (مثلا /XXXXXXXXXXXXXXXX): " WS_PATH
-  read -rp "پورت CDN/WS (مثلا 20011): " WS_PORT
-
   REALITY_BACKEND=pasarguard_reality
-  WS_BACKEND=pasarguard_ws
 
   save_conf
   cleanup_old_units
@@ -162,85 +141,93 @@ do_install() {
   systemctl enable --now pasarguard-watchdog.path
   systemctl start pasarguard-watchdog.service
 
-  echo "[+] نصب کامل شد."
+  echo "[+] Installation completed successfully."
   do_status
 }
 
 # ---------------------------------------------------------------------------
-# گزینه 2: وضعیت
+# Option 2: Status
 # ---------------------------------------------------------------------------
 do_status() {
   if [[ ! -f "$CONF" ]]; then
-    echo "هنوز نصب نشده. اول گزینه 1 رو بزن."
+    echo "Not installed yet. Please run Option 1 first."
     return
   fi
-  echo "--- تنظیمات فعلی ---"
+  echo -e "\n--- Current Configuration ---"
   cat "$CONF"
-  echo
-  echo "--- وضعیت واچ‌داگ ---"
+  echo -e "\n--- Watchdog Status ---"
   systemctl status pasarguard-watchdog.path --no-pager || true
-  echo
-  echo "--- آخرین لاگ‌ها ---"
-  tail -n 15 "$LOG" 2>/dev/null || echo "لاگی هنوز ثبت نشده."
+  echo -e "\n--- Recent Logs ---"
+  tail -n 15 "$LOG" 2>/dev/null || echo "No logs found yet."
 }
 
 # ---------------------------------------------------------------------------
-# گزینه 3: ویرایش
+# Option 3: Edit / Add SNI
 # ---------------------------------------------------------------------------
 do_edit() {
   if [[ ! -f "$CONF" ]]; then
-    echo "اول باید نصب کنی (گزینه 1)."
+    echo "You must install first (Option 1)."
     return
   fi
   # shellcheck source=/dev/null
   source "$CONF"
 
-  read -rp "پورت ریالیتی [$REALITY_PORT]: " v; REALITY_PORT="${v:-$REALITY_PORT}"
+  read -rp "Reality Port [$REALITY_PORT] (Press Enter to keep): " v; REALITY_PORT="${v:-$REALITY_PORT}"
 
-  echo "SNI های فعلی: ${REALITY_SNIS[*]}"
-  read -rp "میخوای SNI ها رو از نو وارد کنی؟ (y/N): " redo
-  if [[ "$redo" == "y" || "$redo" == "Y" ]]; then
+  echo "Current SNIs: ${REALITY_SNIS[*]}"
+  echo "Choose an action for SNIs:"
+  echo "  1) Add new SNIs to the current list"
+  echo "  2) Overwrite (clear and enter from scratch)"
+  echo "  3) Keep current SNIs unchanged"
+  read -rp "Action [1/2/3]: " sni_action
+
+  if [[ "$sni_action" == "1" ]]; then
+    while true; do
+      read -rp "Enter new SNI to ADD (Enter 0 to stop): " sni_next
+      [[ "$sni_next" == "0" || -z "$sni_next" ]] && break
+      REALITY_SNIS+=("$sni_next")
+    done
+  elif [[ "$sni_action" == "2" ]]; then
     REALITY_SNIS=()
-    read -rp "SNI اول: " sni1
+    read -rp "Enter first SNI: " sni1
     REALITY_SNIS+=("$sni1")
     while true; do
-      read -rp "SNI بعدی (برای رد شدن 0 بزن): " sni_next
+      read -rp "Enter next SNI (Enter 0 to stop): " sni_next
       [[ "$sni_next" == "0" || -z "$sni_next" ]] && break
       REALITY_SNIS+=("$sni_next")
     done
   fi
 
-  read -rp "Path CDN [$WS_PATH]: " v; WS_PATH="${v:-$WS_PATH}"
-  read -rp "پورت CDN [$WS_PORT]: " v; WS_PORT="${v:-$WS_PORT}"
-
   save_conf
-  # اگه worker/systemd هنوز موجود نیستن (مثلا از نصب قبلی جدا اومده) بسازشون
+  
+  # Re-create worker and systemd if they were accidentally deleted
   [[ -x "$WORKER" ]] || write_worker
   [[ -f "$SERVICE" && -f "$PATH_UNIT" ]] || { write_systemd_units; systemctl daemon-reload; systemctl enable --now pasarguard-watchdog.path; }
 
-  echo "[+] در حال اعمال فوری تغییرات..."
+  echo "[+] Applying changes immediately..."
   systemctl start pasarguard-watchdog.service
   do_status
 }
 
 # ---------------------------------------------------------------------------
-# منو
+# Main Menu
 # ---------------------------------------------------------------------------
 while true; do
   echo
   echo "=========================================="
-  echo " پنل مدیریت واچ‌داگ Reality + CDN (HAProxy)"
+  echo " Reality SNI Watchdog Manager (HAProxy)"
   echo "=========================================="
-  echo "1) نصب / راه‌اندازی کامل"
-  echo "2) وضعیت"
-  echo "3) ویرایش تنظیمات"
-  echo "4) خروج"
-  read -rp "انتخاب: " choice
+  echo "1) Full Install / Setup"
+  echo "2) View Status & Logs"
+  echo "3) Edit Config / Add SNI"
+  echo "4) Exit"
+  read -rp "Select an option: " choice
   case "$choice" in
     1) do_install ;;
     2) do_status ;;
     3) do_edit ;;
-    4) exit 0 ;;
-    *) echo "گزینه نامعتبره." ;;
+    4) echo "Exiting..."; exit 0 ;;
+    *) echo "Invalid option. Please try again." ;;
   esac
 done
+
