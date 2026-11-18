@@ -1,4 +1,3 @@
-
 #!/bin/bash
 set -eo pipefail
 [[ $EUID -eq 0 ]] || { echo "Error: This script must be run as root (sudo)."; exit 1; }
@@ -53,14 +52,13 @@ if [[ -f "$HAPROXY_CFG" ]]; then
   # 2. Apply Direct WS Route in frontend in-httpmode (L7 routing)
   CLEAN_DIRECT_PATH="${DIRECT_PATH#/}"
   if ! grep -qF "use_backend ${DIRECT_BACKEND} if { path_beg /${CLEAN_DIRECT_PATH} }" "$HAPROXY_CFG"; then
-    sed -i "/^frontend in-httpmode$/a\  use_backend ${DIRECT_BACKEND} if
-{ path_beg /${CLEAN_DIRECT_PATH} }" "$HAPROXY_CFG"
+    sed -i "/^frontend in-httpmode$/a\  use_backend ${DIRECT_BACKEND} if { path_beg /${CLEAN_DIRECT_PATH} }" "$HAPROXY_CFG"
     HAPROXY_CHANGED=1
   fi
   # 3. Apply Reality Routes (L4 TCP SNI routing)
   for SNI in "${REALITY_SNIS[@]}"; do
     if ! grep -qF "use_backend ${REALITY_BACKEND} if { req.ssl_sni -i ${SNI} }" "$HAPROXY_CFG"; then
-      sed -i "/${ANCHOR_REALITY////\/}/a\    use_backend ${REALITY_BACKEND} if { req.ssl_sni -i ${SNI} }" "$HAPROXY_CFG"
+      sed -i "\|${ANCHOR_REALITY}|a\    use_backend ${REALITY_BACKEND} if { req.ssl_sni -i ${SNI} }" "$HAPROXY_CFG"
       HAPROXY_CHANGED=1
     fi
   done
@@ -72,8 +70,7 @@ if [[ -f "$HAPROXY_CFG" ]]; then
   fi
   # 5. Ensure CDN Backend exists
   if ! grep -q "^backend ${CDN_BACKEND}$" "$HAPROXY_CFG"; then
-    printf '\nbackend %s\n    mode http\n    timeout connect 10s\n    timeout server 1h\n    timeout tunnel 1h\n    server pg_cdn 127.0.0.1:%s\n'
-\
+    printf '\nbackend %s\n    mode http\n    timeout connect 10s\n    timeout server 1h\n    timeout tunnel 1h\n    server pg_cdn 127.0.0.1:%s\n' \
       "$CDN_BACKEND" "$CDN_PORT" >> "$HAPROXY_CFG"
     HAPROXY_CHANGED=1
   fi
@@ -87,8 +84,7 @@ if [[ -f "$HAPROXY_CFG" ]]; then
   if [[ $HAPROXY_CHANGED -eq 1 ]]; then
     if haproxy -c -f "$HAPROXY_CFG" >/dev/null 2>&1; then
       systemctl reload hiddify-haproxy
-      echo "$(date '+%F %T') OK - HAProxy: Rules reapplied and reloaded"
->> "$LOG"
+      echo "$(date '+%F %T') OK - HAProxy: Rules reapplied and reloaded" >> "$LOG"
     else
       echo "$(date '+%F %T') CONFIG CHECK FAILED - HAProxy reload skipped" >> "$LOG"
     fi
@@ -159,8 +155,7 @@ select_domain_interactive() {
 # ---------------------------------------------------------------------------
 show_summary() {
 echo -e "\n================================================================================"
-echo "                     NHPG: Architecture & Setup Guide
-             "
+echo "                     NHPG: Architecture & Setup Guide"
 echo "================================================================================"
 if [[ -f "$CONF" ]]; then
   # shellcheck source=/dev/null
@@ -168,8 +163,7 @@ if [[ -f "$CONF" ]]; then
 cat << GUIDE_EOF
 [ 1. TRAFFIC ARCHITECTURE & WORKFLOW ]
 - Public Entry Point : Port 443 (Handled by Hiddify HAProxy).
-- Reality (L4 TCP)   : HAProxy detects SNI and proxies raw TCP via Proxy
-Protocol v2
+- Reality (L4 TCP)   : HAProxy detects SNI and proxies raw TCP via Proxy Protocol v2
                        directly to local port 127.0.0.1:${REALITY_PORT}.
 - CDN (L7 HTTP)      : HAProxy terminates SSL on port 443. Requests starting with
                        '${CDN_PATH}' go as Plain HTTP to 127.0.0.1:${CDN_PORT}.
@@ -204,8 +198,7 @@ Protocol v2
 - Security / TLS     : NONE / False (SSL Termination handled by HAProxy)
 - Proxy Protocol     : NONE / Off
 --------------------------------------------------------------------------------
-[ 3. CLIENT CONFIGURATION (v2rayNG / Streisand / Nekoray / Happ / Clash)
-]
+[ 3. CLIENT CONFIGURATION (v2rayNG / Streisand / Nekoray / Happ / Clash) ]
 >> For Reality Connection:
 - Address            : Your Server IP (or Direct Domain)
 - Port               : 443
@@ -273,8 +266,8 @@ do_install() {
   nginx -t >/dev/null 2>&1 && systemctl reload hiddify-nginx >/dev/null 2>&1 || true
   systemctl daemon-reload
   systemctl enable --now pasarguard-watchdog.path
-  systemctl start pasarguard-watchdog.service
-  echo -e "\n[+] Setup completed successfully. Watchdog is monitoring HAProxy."
+  systemctl start pasarguard-watchdog.service || echo "[!] Worker failed. Check: journalctl -u pasarguard-watchdog.service -n 30 --no-pager"
+  echo -e "\n[+] Setup completed. Watchdog is monitoring HAProxy."
   show_summary
 }
 # ---------------------------------------------------------------------------
@@ -320,7 +313,7 @@ do_edit() {
   fi
   save_conf
   write_worker
-  systemctl start pasarguard-watchdog.service
+  systemctl start pasarguard-watchdog.service || echo "[!] Worker failed. Check: journalctl -u pasarguard-watchdog.service -n 30 --no-pager"
   echo -e "\n[+] Changes applied."
   show_summary
 }
@@ -330,8 +323,7 @@ do_edit() {
 do_uninstall() {
   echo -e "\n[!] Removing PasarGuard Watchdog..."
   systemctl disable --now pasarguard-watchdog.path >/dev/null 2>&1 || true
-  systemctl disable --now pasarguard-watchdog.service >/dev/null 2>&1 ||
-true
+  systemctl disable --now pasarguard-watchdog.service >/dev/null 2>&1 || true
   rm -f "$SERVICE" "$PATH_UNIT" "$CONF" "$WORKER"
   systemctl daemon-reload
   echo "[+] Watchdog removed successfully."
