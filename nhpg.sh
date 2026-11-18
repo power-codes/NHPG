@@ -1,4 +1,11 @@
 #!/bin/bash
+# NHPG installer: installs/overwrites /usr/local/bin/nhpg, then launches it.
+# Next time just run:  nhpg
+set -eo pipefail
+[[ $EUID -eq 0 ]] || { echo "Error: This script must be run as root (sudo)."; exit 1; }
+rm -f /usr/local/bin/nhpg
+cat << 'NHPG_SCRIPT_EOF' > /usr/local/bin/nhpg
+#!/bin/bash
 set -eo pipefail
 [[ $EUID -eq 0 ]] || { echo "Error: This script must be run as root (sudo)."; exit 1; }
 CONF="/opt/hiddify-manager/haproxy/pasarguard_watchdog.conf"
@@ -318,15 +325,54 @@ do_edit() {
   show_summary
 }
 # ---------------------------------------------------------------------------
+# Remove PasarGuard rules/backends from haproxy.cfg (safe: backup + validate + rollback)
+# ---------------------------------------------------------------------------
+remove_haproxy_rules() {
+  [[ -f "$HAPROXY_CFG" ]] || return 0
+  local bak="${HAPROXY_CFG}.nhpg.bak.$(date +%s)"
+  local tmp="${HAPROXY_CFG}.nhpg.tmp"
+  cp -a "$HAPROXY_CFG" "$bak"
+  local b
+  for b in pasarguard_reality pasarguard_cdn pasarguard_direct; do
+    # remove routing rules that point to this backend
+    sed -i "\|use_backend ${b} if|d" "$HAPROXY_CFG"
+    # remove the backend block (header + indented/blank lines that follow it)
+    awk -v name="$b" '
+      /^backend[ \t]/ && $2 == name { skip=1; next }
+      skip && ($0 ~ /^[ \t]/ || $0 == "") { next }
+      { skip=0; print }
+    ' "$HAPROXY_CFG" > "$tmp"
+    cat "$tmp" > "$HAPROXY_CFG"
+    rm -f "$tmp"
+  done
+  if haproxy -c -f "$HAPROXY_CFG" >/dev/null 2>&1; then
+    systemctl reload hiddify-haproxy >/dev/null 2>&1 || true
+    echo "[+] PasarGuard rules removed from haproxy.cfg (backup: $bak)"
+  else
+    cat "$bak" > "$HAPROXY_CFG"
+    echo "[!] haproxy config check failed after cleanup. Original config restored: $HAPROXY_CFG"
+  fi
+}
+# ---------------------------------------------------------------------------
 # Uninstall
 # ---------------------------------------------------------------------------
 do_uninstall() {
   echo -e "\n[!] Removing PasarGuard Watchdog..."
   systemctl disable --now pasarguard-watchdog.path >/dev/null 2>&1 || true
   systemctl disable --now pasarguard-watchdog.service >/dev/null 2>&1 || true
+  read -rp "Also remove PasarGuard rules/backends from haproxy.cfg? [Y/n]: " rm_rules
+  if [[ ! "$rm_rules" =~ ^[Nn]$ ]]; then
+    remove_haproxy_rules
+  fi
   rm -f "$SERVICE" "$PATH_UNIT" "$CONF" "$WORKER"
   systemctl daemon-reload
   echo "[+] Watchdog removed successfully."
+  read -rp "Also remove the 'nhpg' command from /usr/local/bin? [y/N]: " rm_cmd
+  if [[ "$rm_cmd" =~ ^[Yy]$ ]]; then
+    rm -f /usr/local/bin/nhpg
+    echo "[+] nhpg command removed. Exiting..."
+    exit 0
+  fi
 }
 # ---------------------------------------------------------------------------
 # Interactive Menu Loop
@@ -356,3 +402,7 @@ while true; do
     *) echo "Invalid option. Try again." ;;
   esac
 done
+NHPG_SCRIPT_EOF
+chmod +x /usr/local/bin/nhpg
+echo "[+] Installed: /usr/local/bin/nhpg  (run it any time with: nhpg)"
+exec /usr/local/bin/nhpg
